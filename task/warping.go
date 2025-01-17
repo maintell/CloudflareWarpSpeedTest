@@ -7,9 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"golang.org/x/crypto/blake2s"
-	"golang.org/x/crypto/poly1305"
-	"golang.zx2c4.com/wireguard/tai64n"
 	"log"
 	"math/rand"
 	"net"
@@ -18,6 +15,12 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/peanut996/CloudflareWarpSpeedTest/i18n"
+
+	"golang.org/x/crypto/blake2s"
+	"golang.org/x/crypto/poly1305"
+	"golang.zx2c4.com/wireguard/tai64n"
 
 	"github.com/peanut996/CloudflareWarpSpeedTest/utils"
 
@@ -31,7 +34,6 @@ const (
 	defaultPingTimes            = 10
 	udpConnectTimeout           = time.Millisecond * 1000
 	wireguardHandshakeRespBytes = 92
-	quickModeMaxIpNum           = 1000
 	warpPublicKey               = "bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
 )
 
@@ -40,11 +42,9 @@ var (
 
 	PublicKey string
 
-	QuickMode = false
+	AllMode = false
 
 	IPv6Mode = false
-
-	ScanAllPort = false
 
 	ReservedString = ""
 
@@ -53,6 +53,8 @@ var (
 	Routines = defaultRoutines
 
 	PingTimes = defaultPingTimes
+
+	MaxScanCount = 5000
 
 	ports = []int{
 		500, 854, 859, 864, 878, 880, 890, 891, 894, 903,
@@ -74,10 +76,8 @@ var (
 	}
 
 	commonIPv6CIDRs = []string{
-		"2606:4700:d0::/48",
+		"2606:4700:100::/48",
 	}
-
-	MaxWarpPortRange = 10000
 
 	warpHandshakePacket, _ = hex.DecodeString("013cbdafb4135cac96a29484d7a0175ab152dd3e59be35049beadf758b8d48af14ca65f25a168934746fe8bc8867b1c17113d71c0fac5c141ef9f35783ffa5357c9871f4a006662b83ad71245a862495376a5fe3b4f2e1f06974d748416670e5f9b086297f652e6dfbf742fbfc63c3d8aeb175a3e9b7582fbc67c77577e4c0b32b05f92900000000000000000000000000000000")
 )
@@ -116,7 +116,7 @@ func NewWarping() *Warping {
 		ips:     ips,
 		csv:     make(utils.PingDelaySet, 0),
 		control: make(chan bool, Routines),
-		bar:     utils.NewBar(len(ips), "Available:", ""),
+		bar:     utils.NewBar(len(ips), i18n.QueryI18n(i18n.Available), ""),
 	}
 }
 
@@ -162,7 +162,7 @@ func (w *Warping) warpingHandler(ip *UDPAddr) {
 	}
 	data := &utils.PingData{
 		IP:       ip.ToUDPAddr(),
-		Sended:   PingTimes,
+		Sent:     PingTimes,
 		Received: recv,
 		Delay:    totalDelay / time.Duration(recv),
 	}
@@ -180,21 +180,15 @@ func (w *Warping) appendIPData(data *utils.PingData) {
 func loadWarpIPRanges() (ipAddrs []*UDPAddr) {
 	ips := loadIPRanges()
 	addrs := generateIPAddrs(ips)
-	if QuickMode && len(addrs) > quickModeMaxIpNum {
-		return addrs[:quickModeMaxIpNum]
+	if !AllMode && len(addrs) > MaxScanCount {
+		return addrs[:MaxScanCount]
 	}
 	return addrs
 }
 
 func generateIPAddrs(ips []*net.IPAddr) (udpAddrs []*UDPAddr) {
-	if !ScanAllPort {
-		for _, port := range ports {
-			udpAddrs = append(udpAddrs, generateSingleIPAddr(ips, port)...)
-		}
-	} else {
-		for port := 1; port <= MaxWarpPortRange; port++ {
-			udpAddrs = append(udpAddrs, generateSingleIPAddr(ips, port)...)
-		}
+	for _, port := range ports {
+		udpAddrs = append(udpAddrs, generateSingleIPAddr(ips, port)...)
 	}
 	shuffleAddrs(&udpAddrs)
 	return udpAddrs
@@ -278,11 +272,11 @@ func shuffleAddrs(udpAddrs *[]*UDPAddr) {
 func InitHandshakePacket() {
 	if ReservedString != "" {
 		if PrivateKey == "" {
-			log.Fatalln("Reserved field must be used with private key")
+			log.Fatalln(i18n.QueryI18n(i18n.ReservedEmptyError))
 		}
 		r, err := utils.ParseReservedString(ReservedString)
 		if err != nil {
-			log.Fatalln("Failed to parse reserved, it must be 3 bytes slice: " + err.Error())
+			log.Fatalln(i18n.QueryI18n(i18n.ReservedParseError) + err.Error())
 		}
 		reserved = r
 	}
@@ -297,12 +291,12 @@ func InitHandshakePacket() {
 
 	pri, err := getNoisePrivateKeyFromBase64(PrivateKey)
 	if err != nil {
-		log.Fatalln("Failed to parse private key: " + err.Error())
+		log.Fatalln(i18n.QueryI18n(i18n.PrivateKeyParseError) + err.Error())
 	}
 
 	pub, err := getNoisePublicKeyFromBase64(PublicKey)
 	if err != nil {
-		log.Fatalln("Failed to parse public key: " + err.Error())
+		log.Fatalln(i18n.QueryI18n(i18n.PublicKeyParseError) + err.Error())
 	}
 
 	packet := buildHandshakePacket(pri, pub)
@@ -313,7 +307,7 @@ func InitHandshakePacket() {
 func buildHandshakePacket(pri device.NoisePrivateKey, pub device.NoisePublicKey) []byte {
 	d, _, err := netstack.CreateNetTUN([]netip.Addr{}, []netip.Addr{}, 1480)
 	if err != nil {
-		log.Fatalln("Failed to build handshake packet: " + err.Error())
+		log.Fatalln(i18n.QueryI18n(i18n.HandshakePacketBuildFailed) + err.Error())
 	}
 	dev := device.NewDevice(d, conn.NewDefaultBind(), device.NewLogger(0, ""))
 
@@ -321,11 +315,11 @@ func buildHandshakePacket(pri device.NoisePrivateKey, pub device.NoisePublicKey)
 
 	peer, err := dev.NewPeer(pub)
 	if err != nil {
-		log.Fatalln("Failed to build handshake packet: " + err.Error())
+		log.Fatalln(i18n.QueryI18n(i18n.HandshakePacketBuildFailed) + err.Error())
 	}
 	msg, err := dev.CreateMessageInitiation(peer)
 	if err != nil {
-		log.Fatalln("Failed to build handshake packet: " + err.Error())
+		log.Fatalln(i18n.QueryI18n(i18n.HandshakePacketBuildFailed) + err.Error())
 	}
 
 	var buf [device.MessageInitiationSize]byte
@@ -375,10 +369,10 @@ func getNoisePublicKeyFromBase64(b string) (device.NoisePublicKey, error) {
 func encodeBase64ToHex(key string) (string, error) {
 	decoded, err := base64.StdEncoding.DecodeString(key)
 	if err != nil {
-		return "", errors.New("Invalid base64 string: " + key)
+		return "", errors.New(i18n.QueryI18n(i18n.Base64Invalid) + key)
 	}
 	if len(decoded) != 32 {
-		return "", errors.New("Noise key should be 32 bytes: " + key)
+		return "", errors.New(i18n.QueryI18n(i18n.NoiseKeyInvalid) + key)
 	}
 	return hex.EncodeToString(decoded), nil
 }
